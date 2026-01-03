@@ -61,7 +61,10 @@ client = genai.Client(api_key=settings.gemini_api_key)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
+    allow_origins=[
+        "http://localhost:5173",                   # For local development
+        "https://code-archeologist.vercel.app"      # Your live production frontend
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
