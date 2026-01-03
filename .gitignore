@@ -1,0 +1,25 @@
+# --- Frontend (Node/React) ---
+node_modules
+dist
+dist-ssr
+*.local
+npm-debug.log*
+
+# --- Backend (Python/FastAPI) ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+.env
+
+# --- Project Specific (Excavation Site) ---
+/tmp/excavation_site/*
+backend/tmp/*
+*.zip
+
+# --- Editor & OS ---
+.vscode/
+.idea/
+.DS_Store

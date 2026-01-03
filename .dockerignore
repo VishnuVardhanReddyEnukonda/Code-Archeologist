@@ -1,0 +1,9 @@
+node_modules
+__pycache__
+*.pyc
+.git
+.venv
+.env
+/tmp/excavation_site/*
+dist
+build

@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  # The FastAPI Backend
+  api:
+    build: ./backend
+    container_name: arch_backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./backend:/app  # Hot reload for development
+    depends_on:
+      - graph_db
+
+  # Neo4j Graph Database
+  graph_db:
+    image: neo4j:5.12
+    container_name: arch_neo4j
+    ports:
+      - "7474:7474"  # Browser Interface
+      - "7687:7687"  # Bolt Protocol (for code access)
+    environment:
+      - NEO4J_AUTH=neo4j/password123  # Set your password here
+    volumes:
+      - neo4j_data:/data
+
+  frontend:
+    build: ./frontend
+    container_name: arch_frontend
+    ports:
+      - "5173:80"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules # Prevents local node_modules from overwriting container ones
+    depends_on:
+      - api
+    environment:
+      - VITE_API_URL=http://localhost:8000
+volumes:
+  neo4j_data:

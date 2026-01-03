@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+tree-sitter==0.23.2
+tree-sitter-python==0.23.2
+neo4j
+pydantic
+pydantic-settings
+google-genai>=1.2.0
+python-dotenv==1.0.1
+python-multipart
