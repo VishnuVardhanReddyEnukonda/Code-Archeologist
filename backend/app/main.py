@@ -117,13 +117,21 @@ def get_graph():
     return {"nodes": nodes, "edges": edges}
 
 @app.post("/ai/explain")
+
 async def explain_module(request: AnalysisRequest):
+
     """Explains a specific artifact's implementation."""
+
     prompt = f"Analyze this software module: '{request.node_name}'. Context:\n{request.code_context}\nExplain its implementation role."
+
     try:
+
         response = client.models.generate_content(model='gemini-2.0-flash', contents=prompt)
+
         return {"analysis": response.text}
+
     except Exception as e:
+
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/ai/search")
@@ -139,7 +147,7 @@ async def semantic_search(query: str):
     prompt = f"Identify files related to: '{query}'. Context: {context_str}\nCategorize as: Ancient, Stable, or Active. Return format: filename|age (comma separated)."
 
     try:
-        response = client.models.generate_content(model='gemini-2.0-flash', contents=prompt)
+        response = client.models.generate_content(model='gemini-2.5-flash-lite', contents=prompt)
         raw_results = [item.strip() for item in response.text.split(",") if "|" in item]
         final_results = [{"name": i.split("|")[0], "age": i.split("|")[1]} for i in raw_results]
         return {"results": final_results}
@@ -165,7 +173,7 @@ async def refactor_audit():
     report = []
     for f in complex_files:
         prompt = f"Audit this highly coupled file: {f['file']}. Complexity Score: {f['complexity']}. Code:\n{f['code']}\nSuggest a refactoring plan."
-        response = client.models.generate_content(model='gemini-2.0-flash', contents=prompt)
+        response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
         report.append({"file": f['file'], "suggestion": response.text})
 
     return {"refactor_report": report}
