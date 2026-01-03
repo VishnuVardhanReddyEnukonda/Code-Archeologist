@@ -1,20 +1,48 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { 
   ReactFlow, 
   Background, 
   Controls, 
   useNodesState, 
   useEdgesState,
-  Panel 
+  Panel,
+  Handle,
+  Position
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css'; 
 import axios from 'axios';
 
-// 1. DYNAMIC API URL: Use Render URL in production, localhost in dev
+// 1. DYNAMIC API URL
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 const btnStyle = { padding: '8px 14px', background: '#4f46e5', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', transition: 'all 0.2s', fontSize: '12px' };
 const inputStyle = { padding: '8px', borderRadius: '4px', border: '1px solid #334155', background: '#1e293b', color: '#fff', outline: 'none', width: '180px' };
+
+// --- CUSTOM NODE COMPONENT (The missing piece for Edges) ---
+const FileNode = ({ data }) => {
+  return (
+    <div style={{ 
+      background: '#6366f1', 
+      color: '#fff', 
+      padding: '10px', 
+      borderRadius: '8px', 
+      border: '1px solid #4338ca',
+      minWidth: '120px',
+      textAlign: 'center',
+      position: 'relative',
+      boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)'
+    }}>
+      {/* Target Handle (Top) - Recieves connections */}
+      <Handle type="target" position={Position.Top} style={{ background: '#cbd5e1', width: '10px', height: '10px' }} />
+      
+      <div style={{ fontWeight: 'bold', marginBottom: '4px' }}>{data.label}</div>
+      <div style={{ fontSize: '10px', opacity: 0.8, textTransform: 'uppercase' }}>{data.age}</div>
+
+      {/* Source Handle (Bottom) - Sends connections */}
+      <Handle type="source" position={Position.Bottom} style={{ background: '#cbd5e1', width: '10px', height: '10px' }} />
+    </div>
+  );
+};
 
 export default function Flow() {
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
@@ -27,33 +55,41 @@ export default function Flow() {
   const [isSearching, setIsSearching] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
 
-  // 2. Sync Graph from Neo4j AuraDB via Render
+  // Register the custom node type
+  const nodeTypes = useMemo(() => ({ fileNode: FileNode }), []);
+
+  // 2. Sync Graph from Backend
   const fetchGraph = useCallback(async () => {
     try {
       const res = await axios.get(`${API_BASE_URL}/graph?t=${new Date().getTime()}`);
       const { nodes: newNodes, edges: newEdges } = res.data;
 
+      console.log("DEBUG: Backend sent edges:", newEdges); // CHECK CONSOLE IF THIS IS EMPTY!
+
       setNodes(newNodes.map(n => ({
         id: n.id,
+        type: 'fileNode', // <--- IMPORTANT: Use our custom node
         data: { label: n.label, code: n.code, age: n.age || 'Stable' }, 
+        // Random position fallback if backend doesn't provide layout
         position: { x: Math.random() * 600 + 50, y: Math.random() * 400 + 50 },
-        style: { background: '#6366f1', color: '#fff', borderRadius: '8px', padding: '10px' }
       })));
 
       setEdges(newEdges.map((e, i) => ({ 
-        id: `e${i}`, 
-        ...e, 
+        id: e.id || `e${i}`, // Use backend ID if available
+        source: e.source,
+        target: e.target,
         animated: true, 
-        style: { stroke: '#94a3b8', strokeWidth: 2 }
+        style: { stroke: '#94a3b8', strokeWidth: 2 },
+        type: 'default' 
       })));
     } catch (err) {
       console.error("Graph Sync Error:", err);
     }
   }, [setNodes, setEdges]);
 
-  // 3. Clear Cloud Database
+  // 3. Clear Database
   const handleCleanup = async () => {
-    if (window.confirm("Are you sure you want to clear all excavated artifacts from the cloud?")) {
+    if (window.confirm("Are you sure you want to clear all excavated artifacts?")) {
       try {
         await axios.post(`${API_BASE_URL}/cleanup`);
         setNodes([]);
@@ -66,7 +102,7 @@ export default function Flow() {
     }
   };
 
-  // 4. ZIP Upload with Auto-Refresh and Input Reset
+  // 4. File Upload
   const handleFileUpload = async (event) => {
     const file = event.target.files[0];
     if (!file) return;
@@ -78,13 +114,9 @@ export default function Flow() {
     try {
       setAiAnalysis("Re-excavating artifacts...");
       await axios.post(`${API_BASE_URL}/upload-project`, formData);
-      
-      // Delay for AuraDB eventual consistency
       await new Promise(resolve => setTimeout(resolve, 1000)); 
-
       await fetchGraph(); 
-      
-      event.target.value = null; // Allows re-upload of same file
+      event.target.value = null; 
       alert("Excavation Complete!");
     } catch (err) {
       alert("Extraction failed.");
@@ -108,12 +140,8 @@ export default function Flow() {
           );
           return {
             ...node,
-            style: {
-              ...node.style,
-              border: match ? '4px solid #fbbf24' : 'none',
-              boxShadow: match ? '0 0 20px #fbbf24' : 'none',
-            },
-            data: { ...node.data, age: match ? match.age : node.data.age }
+            data: { ...node.data, age: match ? match.age : node.data.age },
+            // Highlight visually via props if passing to custom node, or force update
           };
         })
       );
@@ -124,7 +152,7 @@ export default function Flow() {
     }
   };
 
-  // 6. Global Audit Logic
+  // 6. Audit Logic
   const runRefactorAudit = async () => {
     setIsAuditing(true);
     setSelectedNodeId(null);
@@ -143,12 +171,13 @@ export default function Flow() {
     setSelectedNodeId(node.id);
     setAiAnalysis("Analyzing artifact context...");
     
+    // Simple visual highlighting
     const connectedEdges = edges.filter(e => e.source === node.id || e.target === node.id);
     const connectedNodeIds = new Set([node.id, ...connectedEdges.flatMap(e => [e.source, e.target])]);
 
     setNodes(nds => nds.map(n => ({
       ...n,
-      style: { ...n.style, opacity: connectedNodeIds.has(n.id) ? 1 : 0.15 }
+      style: { ...n.style, opacity: connectedNodeIds.has(n.id) ? 1 : 0.25 }
     })));
 
     try {
@@ -176,7 +205,15 @@ export default function Flow() {
       `}</style>
 
       <div style={{ flex: 1, position: 'relative' }}>
-        <ReactFlow nodes={nodes} edges={edges} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onNodeClick={onNodeClick} fitView>
+        <ReactFlow 
+          nodes={nodes} 
+          edges={edges} 
+          nodeTypes={nodeTypes} // <--- This enables the Custom Node
+          onNodesChange={onNodesChange} 
+          onEdgesChange={onEdgesChange} 
+          onNodeClick={onNodeClick} 
+          fitView
+        >
           <Background color="#1e293b" variant="dots" gap={20} />
           <Controls />
           
@@ -215,7 +252,7 @@ export default function Flow() {
                 ERA: {selectedNode.data.age}
               </span>
               <div style={{ background: '#0f172a', padding: '15px', borderRadius: '8px', fontSize: '11px', marginTop: '20px', border: '1px solid #334155', color: '#cbd5e1', fontFamily: 'monospace' }}>
-                {selectedNode.data.code || "// No artifacts."}
+                {selectedNode.data.code ? selectedNode.data.code.substring(0, 200) + "..." : "// No artifacts."}
               </div>
               <hr style={{ borderColor: '#334155', margin: '20px 0' }} />
               <div style={{ whiteSpace: 'pre-wrap', fontSize: '13px', lineHeight: '1.6' }}>{aiAnalysis}</div>
