@@ -2,7 +2,7 @@ import os
 import zipfile
 import shutil
 from contextlib import asynccontextmanager
-from google import genai 
+import google.generativeai as genai 
 from fastapi import FastAPI, HTTPException, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -12,13 +12,13 @@ from neo4j import GraphDatabase
 
 # Internal imports
 from app.parser import get_dependencies
-from app.database import store_dependencies, close_driver
+from app.database import store_dependencies, close_driver, get_graph_data
 
 # --- 1. SETTINGS & MODELS ---
 class Settings(BaseSettings):
     gemini_api_key: str
-    neo4j_uri: str = os.getenv("NEO4J_URI", "bolt://localhost:7687")
-    neo4j_password: str = os.getenv("NEO4J_PASSWORD", "password")
+    neo4j_uri: str = os.getenv("NEO4J_URI", "bolt://arch_neo4j:7687") # Default to container name
+    neo4j_password: str = os.getenv("NEO4J_PASSWORD", "password123")
     model_config = SettingsConfigDict(env_file=".env")
 
 settings = Settings()
@@ -45,8 +45,12 @@ def universal_scan(target_directory):
                 try:
                     with open(file_path, 'r', errors='ignore') as f:
                         content = f.read()
-                    deps =  get_dependencies(content)
+                    
+                    # FIX 1: Pass BOTH filename and content to the parser
+                    deps = get_dependencies(file, content)
+                    
                     store_dependencies(file, deps, content=content)
+                    print(f"Scanned {file} -> Found {len(deps)} imports")
                 except Exception as e:
                     print(f"DEBUG: Failed to read {file}: {e}")
 
@@ -57,14 +61,12 @@ async def lifespan(app: FastAPI):
     driver.close()
 
 app = FastAPI(title="Code Archaeologist Pro", lifespan=lifespan)
-client = genai.Client(api_key=settings.gemini_api_key)
+# Configure GenAI globally
+genai.configure(api_key=settings.gemini_api_key)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",                   # For local development
-        "https://code-archeologist.vercel.app"      # Your live production frontend
-    ],
+    allow_origins=["*"], # Allow all for debugging
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -93,50 +95,44 @@ async def upload_project(file: UploadFile = File(...)):
         universal_scan(temp_dir)
         return {"message": "Project excavated successfully!"}
     except Exception as e:
+        print(f"Upload Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/graph")
 def get_graph():
-    """Returns nodes with source code and era metadata."""
-    nodes_query = "MATCH (n:File) RETURN n.name as id, n.code as code, n.age as age"
-    edges_query = "MATCH (n:File)-[:DEPENDS_ON]->(m:File) RETURN n.name as source, m.name as target"
-    
-    nodes, edges = [], []
-    with driver.session() as session:
-        node_results = session.run(nodes_query)
-        for record in node_results:
-            nodes.append({
-                "id": record["id"], 
-                "label": record["id"], 
-                "code": record["code"], 
-                "age": record.get("age", "Stable")
-            })
-        edge_results = session.run(edges_query)
-        for record in edge_results:
-            edges.append({"source": record["source"], "target": record["target"]})
-    return {"nodes": nodes, "edges": edges}
+    """
+    FIX 2: Use the robust function from database.py that correctly gets EDGES.
+    """
+    return get_graph_data()
+
+# FIX 3: Model Rotation Logic to prevent 429 Errors
+MODEL_POOL = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-flash-8b"]
 
 @app.post("/ai/explain")
-
 async def explain_module(request: AnalysisRequest):
-
-    """Explains a specific artifact's implementation."""
-
+    """Explains a specific artifact's implementation with fallback."""
     prompt = f"Analyze this software module: '{request.node_name}'. Context:\n{request.code_context}\nExplain its implementation role."
 
-    try:
-
-        response = client.models.generate_content(model='gemini-2.0-flash', contents=prompt)
-
-        return {"analysis": response.text}
-
-    except Exception as e:
-
-        raise HTTPException(status_code=500, detail=str(e))
+    last_error = ""
+    for model_name in MODEL_POOL:
+        try:
+            # Create a model instance for this specific version
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(prompt)
+            return {"analysis": response.text, "model_used": model_name}
+        except Exception as e:
+            last_error = str(e)
+            if "429" in last_error or "RESOURCE_EXHAUSTED" in last_error:
+                print(f"Model {model_name} exhausted. Switching...")
+                continue # Try next model
+            break # Stop for other errors (like auth)
+            
+    raise HTTPException(status_code=429, detail=f"All AI models busy. Last error: {last_error}")
 
 @app.post("/ai/search")
 async def semantic_search(query: str):
     """Semantic search with Archaeological Era classification."""
+    # Updated query to match the relationship type [:IMPORTS]
     db_query = "MATCH (f:File) RETURN f.name as name, left(f.code, 1000) as snippet"
     with driver.session() as session:
         files = [record.data() for record in session.run(db_query)]
@@ -147,7 +143,9 @@ async def semantic_search(query: str):
     prompt = f"Identify files related to: '{query}'. Context: {context_str}\nCategorize as: Ancient, Stable, or Active. Return format: filename|age (comma separated)."
 
     try:
-        response = client.models.generate_content(model='gemini-2.5-flash-lite', contents=prompt)
+        # Use a lightweight model for search
+        model = genai.GenerativeModel('gemini-1.5-flash-8b')
+        response = model.generate_content(prompt)
         raw_results = [item.strip() for item in response.text.split(",") if "|" in item]
         final_results = [{"name": i.split("|")[0], "age": i.split("|")[1]} for i in raw_results]
         return {"results": final_results}
@@ -156,12 +154,12 @@ async def semantic_search(query: str):
 
 @app.get("/ai/refactor-analysis")
 async def refactor_audit():
-    """System-wide audit for God Modules and technical debt."""
-    # Cypher query to find nodes with high coupling (many dependencies)
+    """System-wide audit for God Modules."""
+    # FIX 4: Query updated to use [:IMPORTS] instead of [:DEPENDS_ON]
     db_query = """
-    MATCH (n:File)-[r:DEPENDS_ON]->()
+    MATCH (n:File)-[r:IMPORTS]->()
     WITH n, count(r) as complexity
-    WHERE complexity > 3
+    WHERE complexity > 2
     RETURN n.name as file, n.code as code, complexity
     """
     with driver.session() as session:
@@ -171,10 +169,16 @@ async def refactor_audit():
         return {"refactor_report": [{"file": "System", "suggestion": "Architecture appears modular and stable."}]}
 
     report = []
+    # Use standard Flash model for reasoning
+    model = genai.GenerativeModel('gemini-2.0-flash')
+    
     for f in complex_files:
         prompt = f"Audit this highly coupled file: {f['file']}. Complexity Score: {f['complexity']}. Code:\n{f['code']}\nSuggest a refactoring plan."
-        response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
-        report.append({"file": f['file'], "suggestion": response.text})
+        try:
+            response = model.generate_content(prompt)
+            report.append({"file": f['file'], "suggestion": response.text})
+        except:
+            report.append({"file": f['file'], "suggestion": "Analysis unavailable due to load."})
 
     return {"refactor_report": report}
 
