@@ -11,7 +11,7 @@ from typing import List
 from neo4j import GraphDatabase
 
 # Internal imports
-from app.parser import parse_code_dependencies
+from app.parser import get_dependencies
 from app.database import store_dependencies, close_driver
 
 # --- 1. SETTINGS & MODELS ---
@@ -45,7 +45,7 @@ def universal_scan(target_directory):
                 try:
                     with open(file_path, 'r', errors='ignore') as f:
                         content = f.read()
-                    deps = parse_code_dependencies(content)
+                    deps =  get_dependencies(content)
                     store_dependencies(file, deps, content=content)
                 except Exception as e:
                     print(f"DEBUG: Failed to read {file}: {e}")
