@@ -195,7 +195,8 @@ def get_graph():
 
     # FIX 2: Use [:IMPORTS] to match what database.py saves
 
-    nodes_query = "MATCH (n:File) RETURN n.name as id, n.code as code, n.age as age"
+    # Update your nodes_query in main.py
+    nodes_query = "MATCH (n) RETURN n.name as id, n.name as label, labels(n)[0] as type, n.code as code"
 
     edges_query = "MATCH (n)-[r:IMPORTS|CONTAINS]->(m) RETURN n.name as source, m.name as target"
 
