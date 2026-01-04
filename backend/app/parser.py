@@ -54,8 +54,11 @@ def get_dependencies(filename, code: str):
 
         # 5. CONNECTIVITY FIX: Normalize names to match your graph nodes
         # If we find "utils", we must save it as "utils.py" to match the file node
+        # Instead of just adding .py, consider if it's a submodule
         if not clean_name.endswith('.py'):
-            clean_name += ".py"
+    # If it's a dotted import like 'utils.config', the file is likely 'utils/config.py'
+    # or 'utils.py'. For simplicity in a flat graph:
+            clean_name = clean_name.split('.')[0] + ".py"
             
         # Handle relative imports like 'from . import config' -> 'config.py'
         if clean_name.startswith('.'):
