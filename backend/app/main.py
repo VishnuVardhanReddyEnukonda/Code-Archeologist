@@ -63,65 +63,51 @@ driver = GraphDatabase.driver(settings.neo4j_uri, auth=("neo4j", settings.neo4j_
 
 
 def universal_scan(target_directory):
-    """Wipes database and maps hierarchy AND dependencies with deep logging."""
-    print(f"--- STARTING EXCAVATION: {target_directory} ---")
-    
-    try:
-        with driver.session() as session:
-            session.run("MATCH (n) DETACH DELETE n")
-            print("Database wiped successfully.")
-    except Exception as e:
-        print(f"CRITICAL: Could not connect to Neo4j: {e}")
-        return # Stop if DB is unreachable
-
-    IGNORE_LIST = {'.git', 'node_modules', '__pycache__', '.venv', 'dist', 'build'}
+    """Wipes database and maps hierarchy with collision protection."""
+    with driver.session() as session:
+        session.run("MATCH (n) DETACH DELETE n")
 
     for root, dirs, files in os.walk(target_directory):
-        dirs[:] = [d for d in dirs if d not in IGNORE_LIST]
+        # 1. Calculate relative path to use as a unique ID
         rel_root = os.path.relpath(root, target_directory)
         folder_id = "root" if rel_root == "." else rel_root
 
         for file in files:
-            if file.endswith(('.py', '.js', '.ts', '.cpp', '.h', '.java')):
+            # Add .js or .ts here if your project uses them
+            if file.endswith(('.py', '.js', '.ts')):
+                # 2. CREATE A UNIQUE PATH-BASED ID (e.g., 'utils/config.py')
+                unique_id = os.path.join(rel_root, file).replace("./", "")
                 file_path = os.path.join(root, file)
-                print(f"DEBUG: Processing {file}...")
                 
                 try:
                     with open(file_path, 'r', errors='ignore') as f:
                         content = f.read()
                     
-                    # 1. Parse dependencies
-                    deps = get_dependencies(file, content)
-                    print(f"   -> Found {len(deps)} imports: {deps}")
-                    
-                    # 2. Store metadata
-                    store_dependencies(file, deps, content=content)
-                    
-                    # 3. Create Neo4j Relationships
+                    # 3. Use the unique ID in the parser logic
+                    deps = get_dependencies(unique_id, content)
+
                     with driver.session() as session:
-                        # Create CONTAINS (Hierarchy)
+                        # MERGE on Name ensures uniqueness
                         session.run("""
                             MERGE (folder:Directory {name: $folder_id})
-                            MERGE (file:File {name: $file_name})
+                            MERGE (file:File {name: $unique_id})
+                            SET file.code = $code
                             MERGE (folder)-[:CONTAINS]->(file)
-                        """, folder_id=folder_id, file_name=file)
+                        """, folder_id=folder_id, unique_id=unique_id, code=content)
 
-                        # Create IMPORTS (Logic)
                         for dep in deps:
-                            session.run("""
-                                MERGE (file:File {name: $file_name})
-                                MERGE (target:File {name: $target_name})
-                                MERGE (file)-[:IMPORTS]->(target)
-                            """, file_name=file, target_name=dep)
-                            
-                    print(f"   -> Successfully saved {file} to Neo4j.")
-
+                            # We only create edges to deps that are valid names
+                            if dep and dep != ".py":
+                                session.run("""
+                                    MERGE (f:File {name: $unique_id})
+                                    MERGE (t:File {name: $dep_name})
+                                    MERGE (f)-[:IMPORTS]->(t)
+                                """, unique_id=unique_id, dep_name=dep)
+                    
+                    print(f"DEBUG: Successfully processed {unique_id}")
                 except Exception as e:
-                    # This print will appear in your Render logs and tell us exactly what failed
-                    print(f"ERROR processing {file}: {str(e)}")
-                    continue # Keep going even if one file fails
-
-    print("--- EXCAVATION COMPLETE ---")
+                    # This ensures one bad file doesn't stop the scan
+                    print(f"DEBUG: Skipping {file} due to error: {e}")
 
 
 # --- 3. LIFESPAN ---
