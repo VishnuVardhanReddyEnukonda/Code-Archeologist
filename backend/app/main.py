@@ -168,44 +168,42 @@ def health_check():
 
 
 @app.post("/upload-project")
-
 async def upload_project(file: UploadFile = File(...)):
-
     temp_dir = "/tmp/excavation_site"
-
     if os.path.exists(temp_dir):
-
         shutil.rmtree(temp_dir)
-
     os.makedirs(temp_dir, exist_ok=True)
 
-   
-
     zip_path = os.path.join(temp_dir, "project.zip")
-
     try:
-
         with open(zip_path, "wb") as buffer:
-
             shutil.copyfileobj(file.file, buffer)
-
+        
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-
+            # DEBUG 1: List all files in the ZIP to see the structure
+            print(f"DEBUG: ZIP Contents: {zip_ref.namelist()}")
             zip_ref.extractall(temp_dir)
 
-       
-
-        universal_scan(temp_dir)
-
-        return {"message": "Project excavated successfully!"}
-
+        # DEBUG 2: Identify the actual root
+        # Some ZIPs extract to a nested folder. This finds the first directory.
+        extracted_items = os.listdir(temp_dir)
+        scan_target = temp_dir
+        
+        for item in extracted_items:
+            item_path = os.path.join(temp_dir, item)
+            # If the only thing extracted was a folder, scan that folder instead
+            if os.path.isdir(item_path) and item not in ['__MACOSX']:
+                scan_target = item_path
+                break
+        
+        print(f"DEBUG: Directing universal_scan to: {scan_target}")
+        universal_scan(scan_target)
+        
+        return {"message": f"Project excavated successfully from {os.path.basename(scan_target)}!"}
+    
     except Exception as e:
-
         print(f"Upload Error: {e}")
-
         raise HTTPException(status_code=500, detail=str(e))
-
-
 
 @app.get("/graph")
 
