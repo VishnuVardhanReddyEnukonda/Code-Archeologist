@@ -2,17 +2,10 @@ import tree_sitter_python
 from tree_sitter import Language, Parser
 
 # Initialize the Python Language
-# In standard tree-sitter bindings, we pass the language object directly
 PY_LANGUAGE = Language(tree_sitter_python.language())
 parser = Parser(PY_LANGUAGE)
 
 def get_dependencies(filename, code: str):
-    """
-    Parses Python code to find imports. 
-    Fixes byte-slicing errors and normalizes names to match file nodes.
-    """
-    # 1. CRITICAL: Encode to bytes because Tree-sitter works on bytes
-    # If we don't do this, byte offsets will slice the string incorrectly
     source_bytes = bytes(code, "utf8")
     
     try:
@@ -21,7 +14,6 @@ def get_dependencies(filename, code: str):
         print(f"Parser Error on {filename}: {e}")
         return []
 
-    # Query to capture 'import x' and 'from x import y'
     query_scm = """
     (import_statement
         name: (dotted_name) @import_name)
@@ -38,37 +30,28 @@ def get_dependencies(filename, code: str):
 
     dependencies = set()
 
-    # 2. CRITICAL FIX: 'captures' is a LIST of TUPLES [(Node, str)], not a dict
-    # We unpack (node, capture_name)
-    for node, capture_name in captures:
-        # 3. CRITICAL FIX: Slice the BYTES, then decode back to string
-        # Slicing the 'code' string directly with byte offsets is unsafe
+    for node, _ in captures:
         raw_name = source_bytes[node.start_byte : node.end_byte].decode("utf8")
-        
-        # Clean the name
         clean_name = raw_name.strip()
         
-        # 4. Filter out standard library (Optional, keeps graph clean)
-        if clean_name in ['os', 'sys', 'json', 'datetime', 'typing', 'fastapi']:
+        if not clean_name:
             continue
 
-        # 5. CONNECTIVITY FIX: Normalize names to match your graph nodes
-        # If we find "utils", we must save it as "utils.py" to match the file node
-        # Instead of just adding .py, consider if it's a submodule
-        if not clean_name.endswith('.py'):
-    # If it's a dotted import like 'utils.config', the file is likely 'utils/config.py'
-    # or 'utils.py'. For simplicity in a flat graph:
-            clean_name = clean_name.split('.')[0] + ".py"
-            
-        # Handle relative imports like 'from . import config' -> 'config.py'
-        if clean_name.startswith('.'):
-            clean_name = clean_name.lstrip('.')
+        # 1. First, handle relative imports by removing leading dots
+        clean_name = clean_name.lstrip('.')
 
-        # Don't let a file depend on itself
+        # 2. Second, handle dotted imports (e.g., utils.logger -> utils)
+        # We take the base module name to match your file-based graph nodes
+        if "." in clean_name and not clean_name.endswith('.py'):
+            clean_name = clean_name.split('.')[0]
+        
+        # 3. Finally, ensure it has the .py extension to prevent ghost nodes
+        if not clean_name.endswith('.py'):
+            clean_name += ".py"
+
+        # Avoid self-references
         if clean_name != filename:
             dependencies.add(clean_name)
 
-    # Debug print to see what the backend is actually finding
     print(f"Parsed {filename} -> found: {list(dependencies)}")
-    
     return list(dependencies)

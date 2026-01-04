@@ -6,7 +6,7 @@ import shutil
 
 from contextlib import asynccontextmanager
 
-import google as genai
+from google import genai
 
 from fastapi import FastAPI, HTTPException, File, UploadFile
 
@@ -63,48 +63,44 @@ driver = GraphDatabase.driver(settings.neo4j_uri, auth=("neo4j", settings.neo4j_
 
 
 def universal_scan(target_directory):
-
-    """Wipes database and re-scans directory structure."""
-
+    """Wipes database and maps the full directory-to-file hierarchy."""
     with driver.session() as session:
-
-        session.run("MATCH (n) DETACH DELETE n")
-
-   
-
+        session.run("MATCH (n) DETACH DELETE n") # Start fresh
+    
     IGNORE_LIST = {'.git', 'node_modules', '__pycache__', '.venv', 'dist', 'build'}
 
-
-
     for root, dirs, files in os.walk(target_directory):
-
+        # Filter out unwanted folders
         dirs[:] = [d for d in dirs if d not in IGNORE_LIST]
+        
+        # Get relative folder path for the node name
+        rel_root = os.path.relpath(root, target_directory)
+        folder_id = "root" if rel_root == "." else rel_root
 
         for file in files:
-
+            # Only process supported code artifacts
             if file.endswith(('.py', '.js', '.ts', '.cpp', '.h', '.java')):
-
                 file_path = os.path.join(root, file)
-
                 try:
-
                     with open(file_path, 'r', errors='ignore') as f:
-
                         content = f.read()
-
-                   
-
-                    # FIX 1: Pass filename AND content to parser
-
+                    
+                    # 1. Parse imports and normalize to .py
                     deps = get_dependencies(file, content)
-
+                    
+                    # 2. Store the file and its import edges
                     store_dependencies(file, deps, content=content)
-
-                    print(f"DEBUG: Scanned {file} -> {len(deps)} imports")
-
+                    
+                    # 3. CRITICAL: Link File to its parent Folder
+                    with driver.session() as session:
+                        session.run("""
+                            MERGE (folder:Directory {name: $folder_id})
+                            MERGE (file:File {name: $file_name})
+                            MERGE (folder)-[:CONTAINS]->(file)
+                        """, folder_id=folder_id, file_name=file)
+                    print(f"DEBUG: Successfully excavated {file} in {folder_id}")
                 except Exception as e:
-
-                    print(f"DEBUG: Failed to read {file}: {e}")
+                    print(f"DEBUG: Failed to excavate {file}: {e}")
 
 
 
@@ -201,7 +197,7 @@ def get_graph():
 
     nodes_query = "MATCH (n:File) RETURN n.name as id, n.code as code, n.age as age"
 
-    edges_query = "MATCH (n:File)-[:IMPORTS]->(m:File) RETURN n.name as source, m.name as target"
+    edges_query = "MATCH (n)-[r:IMPORTS|CONTAINS]->(m) RETURN n.name as source, m.name as target"
 
    
 
