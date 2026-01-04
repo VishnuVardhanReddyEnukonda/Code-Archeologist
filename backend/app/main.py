@@ -63,56 +63,43 @@ driver = GraphDatabase.driver(settings.neo4j_uri, auth=("neo4j", settings.neo4j_
 
 
 def universal_scan(target_directory):
-    """Wipes database and maps both directory hierarchy AND code dependencies."""
     with driver.session() as session:
-        session.run("MATCH (n) DETACH DELETE n") # Start fresh
+        session.run("MATCH (n) DETACH DELETE n")
     
-    IGNORE_LIST = {'.git', 'node_modules', '__pycache__', '.venv', 'dist', 'build'}
-
     for root, dirs, files in os.walk(target_directory):
-        # Filter out unwanted folders
-        dirs[:] = [d for d in dirs if d not in IGNORE_LIST]
-        
-        # Get relative folder path for the node name
         rel_root = os.path.relpath(root, target_directory)
         folder_id = "root" if rel_root == "." else rel_root
 
         for file in files:
-            # Only process supported code artifacts
-            if file.endswith(('.py', '.js', '.ts', '.cpp', '.h', '.java')):
+            if file.endswith(('.py', '.js', '.ts')):
                 file_path = os.path.join(root, file)
-                try:
-                    with open(file_path, 'r', errors='ignore') as f:
-                        content = f.read()
+                with open(file_path, 'r', errors='ignore') as f:
+                    content = f.read()
+                
+                # DEBUG 1: Check if the parser is finding anything
+                deps = get_dependencies(file, content)
+                print(f"--- DEBUG: Processing File: {file} ---")
+                print(f"Found Dependencies: {deps}")
+
+                with driver.session() as session:
+                    # Action 1: Create Hierarchy
+                    session.run("""
+                        MERGE (folder:Directory {name: $folder_id})
+                        MERGE (file:File {name: $file_name})
+                        MERGE (folder)-[:CONTAINS]->(file)
+                    """, folder_id=folder_id, file_name=file)
+
+                    # DEBUG 2: Check if the IMPORTS loop actually runs
+                    if not deps:
+                        print(f"WARNING: No dependencies found for {file}. No IMPORTS edges will be created.")
                     
-                    # 1. Parse imports and normalize to .py
-                    deps = get_dependencies(file, content)
-                    
-                    # 2. Store file metadata and imports via separate helper (if used)
-                    store_dependencies(file, deps, content=content)
-                    
-                    # 3. CRITICAL: Link File to its parent Folder (CONTAINS)
-                    # AND link File to its dependencies (IMPORTS)
-                    with driver.session() as session:
-                        # Create Hierarchy
+                    for dep in deps:
+                        print(f"Creating edge: {file} -[:IMPORTS]-> {dep}")
                         session.run("""
-                            MERGE (folder:Directory {name: $folder_id})
                             MERGE (file:File {name: $file_name})
-                            MERGE (folder)-[:CONTAINS]->(file)
-                        """, folder_id=folder_id, file_name=file)
-
-                        # Create Code Dependencies (The Missing Piece)
-                        for dep in deps:
-                            session.run("""
-                                MERGE (file:File {name: $file_name})
-                                MERGE (target:File {name: $target_name})
-                                MERGE (file)-[:IMPORTS]->(target)
-                            """, file_name=file, target_name=dep)
-
-                    print(f"DEBUG: Successfully excavated {file} in {folder_id}")
-                except Exception as e:
-                    print(f"DEBUG: Failed to excavate {file}: {e}")
-
+                            MERGE (target:File {name: $target_name})
+                            MERGE (file)-[:IMPORTS]->(target)
+                        """, file_name=file, target_name=dep)
 
 
 # --- 3. LIFESPAN ---
