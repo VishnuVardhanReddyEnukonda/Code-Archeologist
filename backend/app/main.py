@@ -2,7 +2,7 @@ import os
 import zipfile
 import shutil
 from contextlib import asynccontextmanager
-import google.generativeai as genai
+import google as genai
 from fastapi import FastAPI, HTTPException, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
