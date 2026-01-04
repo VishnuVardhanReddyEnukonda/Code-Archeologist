@@ -1,81 +1,46 @@
 import os
-
 import zipfile
-
 import shutil
-
 from contextlib import asynccontextmanager
-
-from google import genai
-
+from google import genai 
 from fastapi import FastAPI, HTTPException, File, UploadFile
-
 from fastapi.middleware.cors import CORSMiddleware
-
 from pydantic import BaseModel
-
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-from typing import List
-
 from neo4j import GraphDatabase
 
-
-
 # Internal imports
-
 from app.parser import get_dependencies
-
-from app.database import store_dependencies, close_driver, get_graph_data
-
-
+from app.database import store_dependencies
 
 # --- 1. SETTINGS & MODELS ---
-
 class Settings(BaseSettings):
-
     gemini_api_key: str
-
-    neo4j_uri: str = os.getenv("NEO4J_URI", "bolt://arch_neo4j:7687") # Default to container name for Render
-
+    neo4j_uri: str = os.getenv("NEO4J_URI", "bolt://arch_neo4j:7687")
     neo4j_password: str = os.getenv("NEO4J_PASSWORD", "password123")
-
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
-
-
 
 settings = Settings()
 
-
-
 class AnalysisRequest(BaseModel):
-
     node_name: str
-
     code_context: str = ""
 
-
-
-# --- 2. DATABASE DRIVER ---
-
+# --- 2. DATABASE DRIVER & AI CLIENT ---
 driver = GraphDatabase.driver(settings.neo4j_uri, auth=("neo4j", settings.neo4j_password))
-
-
+# Use the 2026-compliant SDK
+client = genai.Client(api_key=settings.gemini_api_key)
 
 def universal_scan(target_directory):
-    """Wipes database and maps hierarchy with collision protection."""
     with driver.session() as session:
         session.run("MATCH (n) DETACH DELETE n")
 
     for root, dirs, files in os.walk(target_directory):
-        # 1. Calculate relative path to use as a unique ID
         rel_root = os.path.relpath(root, target_directory)
         folder_id = "root" if rel_root == "." else rel_root
 
         for file in files:
-            # Add .js or .ts here if your project uses them
-            if file.endswith(('.py', '.js', '.ts')):
-                # 2. CREATE A UNIQUE PATH-BASED ID (e.g., 'utils/config.py')
+            if file.endswith(('.py', '.js', '.ts', '.cpp', '.h')):
                 unique_id = os.path.join(rel_root, file).replace("./", "")
                 file_path = os.path.join(root, file)
                 
@@ -83,11 +48,10 @@ def universal_scan(target_directory):
                     with open(file_path, 'r', errors='ignore') as f:
                         content = f.read()
                     
-                    # 3. Use the unique ID in the parser logic
                     deps = get_dependencies(unique_id, content)
 
                     with driver.session() as session:
-                        # MERGE on Name ensures uniqueness
+                        # Map Hierarchy
                         session.run("""
                             MERGE (folder:Directory {name: $folder_id})
                             MERGE (file:File {name: $unique_id})
@@ -95,63 +59,39 @@ def universal_scan(target_directory):
                             MERGE (folder)-[:CONTAINS]->(file)
                         """, folder_id=folder_id, unique_id=unique_id, code=content)
 
+                        # Map Logic
                         for dep in deps:
-                            # We only create edges to deps that are valid names
                             if dep and dep != ".py":
                                 session.run("""
                                     MERGE (f:File {name: $unique_id})
                                     MERGE (t:File {name: $dep_name})
                                     MERGE (f)-[:IMPORTS]->(t)
                                 """, unique_id=unique_id, dep_name=dep)
-                    
-                    print(f"DEBUG: Successfully processed {unique_id}")
                 except Exception as e:
-                    # This ensures one bad file doesn't stop the scan
-                    print(f"DEBUG: Skipping {file} due to error: {e}")
-
+                    print(f"DEBUG: Skipping {file}: {e}")
 
 # --- 3. LIFESPAN ---
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # REMOVED genai.configure because it does not exist in the new SDK
     print("Code Archaeologist Startup...")
     yield
     driver.close()
 
-
-
 app = FastAPI(title="Code Archaeologist Pro", lifespan=lifespan)
 
-
-
 app.add_middleware(
-
     CORSMiddleware,
-
-    allow_origins=["*"], # Allow all for production/dev compatibility
-
+    allow_origins=["*"],
     allow_credentials=True,
-
     allow_methods=["*"],
-
     allow_headers=["*"],
-
 )
-
-
 
 # --- 4. ENDPOINTS ---
 
-
-
 @app.get("/")
-
 def health_check():
-
     return {"status": "active", "system": "Code Archaeologist", "year": 2026}
-
-
 
 @app.post("/upload-project")
 async def upload_project(file: UploadFile = File(...)):
@@ -166,230 +106,98 @@ async def upload_project(file: UploadFile = File(...)):
             shutil.copyfileobj(file.file, buffer)
         
         with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-            # DEBUG 1: List all files in the ZIP to see the structure
-            print(f"DEBUG: ZIP Contents: {zip_ref.namelist()}")
             zip_ref.extractall(temp_dir)
 
-        # DEBUG 2: Identify the actual root
-        # Some ZIPs extract to a nested folder. This finds the first directory.
         extracted_items = os.listdir(temp_dir)
         scan_target = temp_dir
-        
         for item in extracted_items:
             item_path = os.path.join(temp_dir, item)
-            # If the only thing extracted was a folder, scan that folder instead
             if os.path.isdir(item_path) and item not in ['__MACOSX']:
                 scan_target = item_path
                 break
         
-        print(f"DEBUG: Directing universal_scan to: {scan_target}")
         universal_scan(scan_target)
-        
-        return {"message": f"Project excavated successfully from {os.path.basename(scan_target)}!"}
-    
+        return {"message": "Project excavated successfully!"}
     except Exception as e:
-        print(f"Upload Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/graph")
-
 def get_graph():
-
-    """Returns nodes and edges using the correct relationship type."""
-
-    # FIX 2: Use [:IMPORTS] to match what database.py saves
-
-    # Update your nodes_query in main.py
-    nodes_query = "MATCH (n) RETURN n.name as id, n.name as label, labels(n)[0] as type, n.code as code"
-
-    edges_query = "MATCH (n)-[r:IMPORTS|CONTAINS]->(m) RETURN n.name as source, m.name as target"
-
-   
-
+    nodes_query = "MATCH (n) RETURN n.name as id, labels(n)[0] as type, n.code as code, n.age as age"
+    edges_query = "MATCH (n)-[r:IMPORTS|CONTAINS]->(m) RETURN n.name as source, m.name as target, type(r) as rel_type"
+    
     nodes, edges = [], []
-
-    try:
-
-        with driver.session() as session:
-
-            node_results = session.run(nodes_query)
-
-            for record in node_results:
-
-                nodes.append({
-
-                    "id": record["id"],
-
-                    "label": record["id"],
-
-                    "code": record["code"],
-
-                    "age": record.get("age", "Stable")
-
-                })
-
-           
-
-            edge_results = session.run(edges_query)
-
-            for record in edge_results:
-
-                edges.append({
-
-                    "id": f"e-{record['source']}-{record['target']}",
-
-                    "source": record["source"],
-
-                    "target": record["target"],
-
-                    "animated": True
-
-                })
-
-        return {"nodes": nodes, "edges": edges}
-
-    except Exception as e:
-
-        print(f"Graph Error: {e}")
-
-        return {"nodes": [], "edges": []}
-
-
+    with driver.session() as session:
+        node_results = session.run(nodes_query)
+        for record in node_results:
+            nodes.append({
+                "id": record["id"], 
+                "label": record["id"], 
+                "code": record["code"], 
+                "type": record["type"],
+                "age": record.get("age", "Stable")
+            })
+        
+        edge_results = session.run(edges_query)
+        for record in edge_results:
+            edges.append({
+                "id": f"e-{record['source']}-{record['target']}",
+                "source": record["source"], 
+                "target": record["target"], 
+                "type": record["rel_type"]
+            })
+    return {"nodes": nodes, "edges": edges}
 
 @app.post("/ai/explain")
-
 async def explain_module(request: AnalysisRequest):
-
-    """Explains a specific artifact's implementation."""
-
     prompt = f"Analyze this software module: '{request.node_name}'. Context:\n{request.code_context}\nExplain its implementation role."
-
-
-
     try:
-
-        model = genai.GenerativeModel('gemini-2.0-flash')
-
-        response = model.generate_content(prompt)
-
+        # Correct 2026 Client Call
+        response = client.models.generate_content(model='gemini-2.0-flash', contents=prompt)
         return {"analysis": response.text}
-
     except Exception as e:
-
-        # Graceful fallback for rate limits
-
-        return {"analysis": f"AI unavailable ({str(e)}). Try again later."}
-
-
+        return {"analysis": f"AI unavailable ({str(e)})."}
 
 @app.post("/ai/search")
-
 async def semantic_search(query: str):
-
-    """Semantic search with Archaeological Era classification."""
-
     db_query = "MATCH (f:File) RETURN f.name as name, left(f.code, 1000) as snippet"
-
     with driver.session() as session:
-
         files = [record.data() for record in session.run(db_query)]
-
-
 
     if not files: return {"results": []}
 
-
-
     context_str = "\n".join([f"File: {f['name']}\nCode: {f['snippet']}" for f in files])
-
-    prompt = f"Identify files related to: '{query}'. Context: {context_str}\nCategorize as: Ancient, Stable, or Active. Return format: filename|age (comma separated)."
-
-
+    prompt = f"Identify files related to: '{query}'. Context: {context_str}\nReturn ONLY filename|age (comma separated)."
 
     try:
-
-        # Use Flash-Lite for speed/cost efficiency
-
-        model = genai.GenerativeModel('gemini-1.5-flash')
-
-        response = model.generate_content(prompt)
-
+        response = client.models.generate_content(model='gemini-2.0-flash', contents=prompt)
         raw_results = [item.strip() for item in response.text.split(",") if "|" in item]
-
-        final_results = [{"name": i.split("|")[0], "age": i.split("|")[1]} for i in raw_results]
-
-        return {"results": final_results}
-
+        return {"results": [{"name": i.split("|")[0], "age": i.split("|")[1]} for i in raw_results]}
     except Exception:
-
         return {"results": []}
 
-
-
 @app.get("/ai/refactor-analysis")
-
 async def refactor_audit():
-
-    """System-wide audit for God Modules and technical debt."""
-
-    # FIX 3: Use [:IMPORTS] to correctly find high-coupling nodes
-
-    db_query = """
-
-    MATCH (n:File)-[r:IMPORTS]->()
-
-    WITH n, count(r) as complexity
-
-    WHERE complexity > 3
-
-    RETURN n.name as file, n.code as code, complexity
-
-    """
-
+    db_query = "MATCH (n:File)-[r:IMPORTS]->() WITH n, count(r) as complexity WHERE complexity > 3 RETURN n.name as file, n.code as code, complexity"
     with driver.session() as session:
-
         complex_files = [record.data() for record in session.run(db_query)]
 
-
-
     if not complex_files:
-
         return {"refactor_report": [{"file": "System", "suggestion": "Architecture appears modular and stable."}]}
 
-
-
     report = []
-
-    model = genai.GenerativeModel('gemini-2.0-flash')
-
-   
-
     for f in complex_files:
-
-        prompt = f"Audit this highly coupled file: {f['file']}. Complexity Score: {f['complexity']}. Code:\n{f['code']}\nSuggest a refactoring plan."
-
+        prompt = f"Audit this highly coupled file: {f['file']}. Code:\n{f['code']}\nSuggest refactoring."
         try:
-
-            response = model.generate_content(prompt)
-
+            response = client.models.generate_content(model='gemini-2.0-flash', contents=prompt)
             report.append({"file": f['file'], "suggestion": response.text})
-
         except:
-
-             report.append({"file": f['file'], "suggestion": "Analysis skipped due to high load."})
-
-
+            continue
 
     return {"refactor_report": report}
 
-
-
 @app.post("/cleanup")
-
 async def cleanup_database():
-
     with driver.session() as session:
-
         session.run("MATCH (n) DETACH DELETE n")
-
     return {"message": "Site cleared."}
